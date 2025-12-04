@@ -1,36 +1,37 @@
-import os
+# backend/app/app.py
+from pathlib import Path
 from typing import List, Dict
 
 from fastapi import FastAPI, Request, Depends
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from app.models.chat import ChatRequest, ChatResponse
 from app.services.openai_client import get_embedding, chat_with_context
 from app.services.search_client import hybrid_retrieve
 from app.auth.easyauth import get_current_user
 
-# FastAPI app
-app = FastAPI(title="Azure RAG Web App with Easy Auth")
+app = FastAPI(title="Azure RAG Web App")
 
-# Paths for templates and static files (relative to this file)
-BASE_DIR = os.path.dirname(__file__)
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+# ---------- Paths ----------
+APP_DIR = Path(__file__).resolve().parent      # .../backend/app
+BACKEND_DIR = APP_DIR.parent                   # .../backend
+ROOT_DIR = BACKEND_DIR.parent                  # .../azure-rag-app
+FRONTEND_DIR = ROOT_DIR / "frontend"           # .../frontend
 
+TEMPLATE_DIR = FRONTEND_DIR / "template"       # .../frontend/template
+STATIC_DIR = FRONTEND_DIR / "static"           # .../frontend/static
+
+# Serve /static -> frontend/static
 app.mount(
     "/static",
-    StaticFiles(directory=os.path.join(BASE_DIR, "static")),
+    StaticFiles(directory=str(STATIC_DIR)),
     name="static",
 )
 
 
-# ---------- Utility: build RAG prompt ----------
-
+# ---------- Helper: build RAG messages ----------
 def build_rag_messages(question: str, docs: List[Dict]) -> List[Dict]:
-    """
-    Build the system + user messages for RAG using retrieved documents.
-    """
     context_chunks = []
     for i, d in enumerate(docs, start=1):
         source = d.get("source") or f"doc-{i}"
@@ -56,16 +57,16 @@ def build_rag_messages(question: str, docs: List[Dict]) -> List[Dict]:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """
-    Main page – serves the chat UI (templates/index.html).
+    Serve the frontend HTML from frontend/template/index.html.
     """
-    return templates.TemplateResponse("index.html", {"request": request})
+    index_file = TEMPLATE_DIR / "index.html"
+    if not index_file.exists():
+        return HTMLResponse("index.html not found", status_code=500)
+    return FileResponse(index_file)
 
 
 @app.get("/health")
 async def health():
-    """
-    Simple health check endpoint.
-    """
     return {"status": "ok"}
 
 
@@ -76,28 +77,20 @@ async def chat(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    RAG chat endpoint.
-
-    - Easy Auth must have authenticated the user already (on Azure).
-    - Locally, get_current_user can be configured to bypass auth for dev.
+    RAG chat endpoint (protected by Easy Auth in Azure).
     """
-    # current_user contains info from Easy Auth (e.g., email, user_id, name)
-    # You can log or use it for per-user behavior if needed:
-    #   print("Current user:", current_user)
-
     question = req.messages[-1].content
 
     # 1. Embed query
     embedding = get_embedding(question)
 
-    # 2. Retrieve relevant docs from Azure AI Search
+    # 2. Retrieve docs from Azure AI Search
     docs = hybrid_retrieve(question, embedding, top_k=req.top_k)
 
-    # 3. Build messages for Azure OpenAI with context
+    # 3. Build messages with context
     messages = build_rag_messages(question, docs)
 
-    # 4. Get model answer
+    # 4. Call Azure OpenAI
     answer = chat_with_context(messages)
 
-    # 5. Return answer + sources for UI to display
     return ChatResponse(answer=answer, sources=docs)
